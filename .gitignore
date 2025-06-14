@@ -1,0 +1,11 @@
+embeddings/
+data/
+logs/
+*.pyc
+__pycache__/
+.env
+.vscode/
+*.log
+*.npz
+*.json
+.venv/
