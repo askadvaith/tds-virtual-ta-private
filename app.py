@@ -630,6 +630,10 @@ app = Flask(__name__)
 CORS(app)
 virtual_ta = TDSVirtualTA()
 
+@app.route('/', methods=['GET', 'POST'])
+def root():
+    return jsonify({"status": "ok"}), 200
+
 @app.route('/api/', methods=['POST'])
 def handle_question():
     try:
