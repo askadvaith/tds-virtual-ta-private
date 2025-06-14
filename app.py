@@ -487,23 +487,54 @@ load_dotenv()
 class TDSVirtualTA:
     def __init__(self, embeddings_dir: str = "embeddings"):
         self.embeddings_dir = Path(embeddings_dir)
+        self.embeddings_dir.mkdir(exist_ok=True)
         self.embeddings_file = self.embeddings_dir / "tds_embeddings.npz"
         self.metadata_file = self.embeddings_dir / "tds_metadata.json"
-        self.embeddings = np.load(self.embeddings_file)['embeddings']
-        with open(self.metadata_file, 'r', encoding='utf-8') as f:
-            self.chunks = json.load(f)
+        self.hf_token = os.getenv("HUGGINGFACE_TOKEN") 
         self.aipipe_token = os.getenv("AIPIPE_TOKEN")
-        self.openai_model = "gpt-4.1-mini"
+        self.openai_model = "gpt-4.1-mini" # Free API token
+
+        # Load embeddings and metadata
+        if self.embeddings_file.exists() and self.metadata_file.exists():
+            embeddings_data = np.load(self.embeddings_file)
+            self.embeddings = embeddings_data['embeddings']
+            with open(self.metadata_file, 'r', encoding='utf-8') as f:
+                self.chunks = json.load(f)
+        else:
+            raise RuntimeError("Embeddings or metadata file not found. Please generate them first.")
+
+    def get_query_embedding_aipipe(self, query: str) -> np.ndarray:
+        """Get embedding using AIPipe OpenAI-compatible endpoint"""
+        try:
+            headers = {
+                "Authorization": self.aipipe_token,
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "text-embedding-ada-002",
+                "input": query
+            }
+            response = requests.post(
+                "https://aipipe.org/openai/v1/embeddings",
+                headers=headers,
+                json=payload,
+                timeout=20
+            )
+            response.raise_for_status()
+            data = response.json()
+            if "data" in data and len(data["data"]) > 0 and "embedding" in data["data"][0]:
+                embedding = np.array(data["data"][0]["embedding"])
+                return embedding.reshape(1, -1)
+            else:
+                print(f"AIPipe embedding API returned no embedding for: {query[:60]}")
+                return np.zeros((1, self.embeddings.shape[1]))
+        except Exception as e:
+            print(f"Error with AIPipe embedding: {e}")
+            return np.zeros((1, self.embeddings.shape[1]))
 
     def search_similar_chunks(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        import google.generativeai as genai
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        client = genai.Client()
-        response = client.models.embed_content(
-            model="gemini-embedding-exp-03-07",
-            content=query
-        )
-        query_embedding = np.array([response['embedding']])
+        """Search using AIPipe embeddings for the query"""
+        query_embedding = self.get_query_embedding_aipipe(query)
         similarities = cosine_similarity(query_embedding, self.embeddings)[0]
         top_indices = np.argsort(similarities)[::-1][:top_k]
         results = []
