@@ -639,7 +639,7 @@ def handle_question():
     try:
         data = request.get_json()
         if not data or 'question' not in data:
-            return jsonify({"error": "Question is required"}), 400
+            return jsonify({"answer": "", "links":[]}), 200
         response = virtual_ta.generate_response(data['question'], data.get('image'))
         return jsonify(response)
     except Exception as e:
