@@ -7,5 +7,5 @@ __pycache__/
 .vscode/
 *.log
 *.npz
-*.json
+tds_discourse_posts.json
 .venv/
