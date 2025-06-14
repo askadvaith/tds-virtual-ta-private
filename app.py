@@ -632,7 +632,7 @@ virtual_ta = TDSVirtualTA()
 
 @app.route('/', methods=['GET', 'POST'])
 def root():
-    return jsonify({"status": "ok", ".answer":"TDS Virtual TA is running.", ".links": []}), 200
+    return jsonify({"status": "ok", "answer":"TDS Virtual TA is running.", "links": [], ".answer":"TDS Virtual TA is running.", ".links": []}), 200
 
 @app.route('/api/', methods=['GET','POST'])
 def handle_question():
