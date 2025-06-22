@@ -1,5 +1,186 @@
-# # TDS Virtual Teaching Assistant
-# # Complete implementation with embedding generation, storage, and API server
+import os
+import json
+import numpy as np
+import requests
+from typing import List, Dict, Any, Optional
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from sklearn.metrics.pairwise import cosine_similarity
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class TDSVirtualTA:
+    def __init__(self, embeddings_dir: str = "embeddings"):
+        self.embeddings_dir = Path(embeddings_dir)
+        self.embeddings_dir.mkdir(exist_ok=True)
+        self.embeddings_file = self.embeddings_dir / "tds_embeddings.npz"
+        self.metadata_file = self.embeddings_dir / "tds_metadata.json"
+        self.hf_token = os.getenv("HUGGINGFACE_TOKEN") 
+        self.aipipe_token = os.getenv("AIPIPE_TOKEN")
+        self.openai_model = "gpt-4.1-mini" # Free API token
+
+        # Load embeddings and metadata
+        if self.embeddings_file.exists() and self.metadata_file.exists():
+            embeddings_data = np.load(self.embeddings_file)
+            self.embeddings = embeddings_data['embeddings']
+            with open(self.metadata_file, 'r', encoding='utf-8') as f:
+                self.chunks = json.load(f)
+        else:
+            raise RuntimeError("Embeddings or metadata file not found. Please generate them first.")
+
+    def get_query_embedding_aipipe(self, query: str) -> np.ndarray:
+        """Get embedding using AIPipe OpenAI-compatible endpoint"""
+        try:
+            headers = {
+                "Authorization": self.aipipe_token,
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "text-embedding-ada-002",
+                "input": query
+            }
+            response = requests.post(
+                "https://aipipe.org/openai/v1/embeddings",
+                headers=headers,
+                json=payload,
+                timeout=20
+            )
+            response.raise_for_status()
+            data = response.json()
+            if "data" in data and len(data["data"]) > 0 and "embedding" in data["data"][0]:
+                embedding = np.array(data["data"][0]["embedding"])
+                return embedding.reshape(1, -1)
+            else:
+                print(f"AIPipe embedding API returned no embedding for: {query[:60]}")
+                return np.zeros((1, self.embeddings.shape[1]))
+        except Exception as e:
+            print(f"Error with AIPipe embedding: {e}")
+            return np.zeros((1, self.embeddings.shape[1]))
+
+    def search_similar_chunks(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Search using AIPipe embeddings for the query"""
+        query_embedding = self.get_query_embedding_aipipe(query)
+        similarities = cosine_similarity(query_embedding, self.embeddings)[0]
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+        results = []
+        for idx in top_indices:
+            chunk = self.chunks[idx].copy()
+            chunk['similarity'] = float(similarities[idx])
+            results.append(chunk)
+        return results
+
+
+    def generate_response(self, question: str, image_base64: Optional[str] = None) -> Dict[str, Any]:
+        authoritative_users = {
+            "s.anand", "carlton", "Jivraj", "devam_07", "PulkitMangal",
+            "22f3001517", "SahuUtkarsh03", "deepbist", "23f1001171"
+        }
+        relevant_chunks = self.search_similar_chunks(question, top_k=8)
+        def is_authoritative(chunk):
+            return chunk['type'] == 'forum_post' and chunk.get('metadata', {}).get('username') in authoritative_users
+        relevant_chunks.sort(key=lambda c: (not is_authoritative(c), -c.get('similarity', 0)))
+        context = ""
+        for i, chunk in enumerate(relevant_chunks):
+            context += f"Context {i+1}:\nSource: {chunk['source']}\nContent: {chunk['content']}\n\n"
+        image_context = "\n\nThe user has also provided an image with their question. Please consider the image content when formulating your response." if image_base64 else ""
+        prompt = f"""Act like a Virtual Teaching Assistant for the "Tools in Data Science" course. You are responsible for helping students by answering their questions accurately and concisely using only the context provided from official course materials and forum discussions.
+
+Your task is to evaluate and respond to a student’s question, which may include an image. Carefully analyze the question and any image it contains. Your answer must strictly follow the guidelines below.
+
+Objective:
+Provide a practical, well-reasoned, and context-based answer that supports the student's learning and aligns with the official course content.
+
+Step-by-step instructions:
+1. Begin by examining whether the student has uploaded an image. If yes, extract the core problem from the image. Identify the question being asked, and propose the most efficient and practical method to solve it. Clearly state your reasoning process.
+2. Next, read the written question provided by the student. Do not assume their statements are correct—validate everything only against the provided context.
+3. Cross-reference the question (and image, if applicable) with the provided context from course materials and forum posts. Ensure all information in your answer is drawn directly from that context.
+4. If the context lacks enough information to answer the question accurately, explicitly state: "The context provided does not contain sufficient information to answer this question reliably."
+5. Focus on providing practical guidance that the student can apply. If a specific method or formula is implied in the context, walk the student through its application.
+6. If your answer refers to a specific course material or forum post, cite it using brief labels (e.g., "As seen in Module 3 notes" or "Forum reply on k-means clustering from Week 5").
+7. Use concise, student-friendly language and avoid generic or speculative responses. Talk directly to the student as if you are their personal TA.
+8. Follow all recommendations given in the course materials. For example, the course material suggests using Podman over Docker, so your answer should reflect that preference.
+9. NOTE: The bonus marks for assignments in the course are added to the total, not the maximum. Scores are typically shown out of 100. For example, if a student gets a bonus point for an assignment out of 10, their score is given as 11/10 or 110 on their dashboard.
+
+IMPORTANT:
+– Do not treat student-provided information as factual unless it is confirmed by the course context.
+– Do not guess or extrapolate beyond the context.
+– Prioritize helping the student learn how to approach the problem practically.
+
+Student Question: {question}{image_context}
+
+Relevant Context from Course Materials and Forum:
+{context}
+
+Take a deep breath and work through this problem step by step.
+"""
+        try:
+            headers = {
+                "Authorization": self.aipipe_token,
+                "Content-Type": "application/json"
+            }
+            image_content = []
+            if image_base64:
+                image_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{image_base64}"}
+                })
+            messages = [{"role": "user", "content": [{"type": "text", "text": prompt}] + image_content}]
+            data = {"model": self.openai_model, "messages": messages}
+            resp = requests.post("https://aipipe.org/openai/v1/chat/completions", headers=headers, json=data, timeout=30)
+            resp.raise_for_status()
+            answer = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            links = []
+            for chunk in relevant_chunks[:5]:
+                if chunk['similarity'] > 0.3:
+                    if chunk['type'] == 'forum_post':
+                        md = chunk.get('metadata', {})
+                        url = f"https://discourse.onlinedegree.iitm.ac.in/t/{md.get('slug')}/{md.get('topic_id')}/{md.get('post_number')}"
+                        is_auth = md.get('username') in authoritative_users
+                        links.append({"url": url, "text": f"{'Authoritative: ' if is_auth else ''}Forum discussion - {chunk['content'][:100]}..."})
+                    elif chunk['type'] == 'course_material':
+                        fp = chunk['metadata'].get('file_path', '')
+                        md_name = Path(fp).stem if fp else 'content'
+                        links.append({"url": f"https://tds.s-anand.net/#/{md_name}", "text": f"Course material: {chunk.get('header', 'Content section')}"})
+            seen_urls, unique_links = set(), []
+            for link in links:
+                if link['url'] not in seen_urls:
+                    unique_links.append(link)
+                    seen_urls.add(link['url'])
+            return {"answer": answer or "Sorry, I could not generate a response.", "links": unique_links[:5]}
+        except Exception as e:
+            print(f"Error generating response: {e}")
+            return {"answer": "I apologize, an error occurred.", "links": []}
+
+app = Flask(__name__)
+CORS(app)
+virtual_ta = TDSVirtualTA()
+
+@app.route('/', methods=['GET', 'POST'])
+def root():
+    return jsonify({"status": "ok", "answer":"TDS Virtual TA is running.", "links": [], ".answer":"TDS Virtual TA is running.", ".links": []}), 200
+
+@app.route('/api/', methods=['GET','POST'])
+def handle_question():
+    try:
+        data = request.get_json()
+        if not data or 'question' not in data:
+            return jsonify({"answer": "", "links":[]}), 200
+        response = virtual_ta.generate_response(data['question'], data.get('image'))
+        return jsonify(response)
+    except Exception as e:
+        print(f"Error handling request: {e}")
+        return jsonify({"error": "Internal server error", "answer": "An error occurred.", "links": []}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy", "message": "TDS Virtual TA is running"})
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
+
+# ---- REFERENCE VERSIONS (for Gemini API, local embedding model)
 
 # import os
 # import json
@@ -470,185 +651,3 @@
 # if __name__ == "__main__":
 #     # For local development
 #     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
-
-import os
-import json
-import numpy as np
-import requests
-from typing import List, Dict, Any, Optional
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from sklearn.metrics.pairwise import cosine_similarity
-from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv()
-
-class TDSVirtualTA:
-    def __init__(self, embeddings_dir: str = "embeddings"):
-        self.embeddings_dir = Path(embeddings_dir)
-        self.embeddings_dir.mkdir(exist_ok=True)
-        self.embeddings_file = self.embeddings_dir / "tds_embeddings.npz"
-        self.metadata_file = self.embeddings_dir / "tds_metadata.json"
-        self.hf_token = os.getenv("HUGGINGFACE_TOKEN") 
-        self.aipipe_token = os.getenv("AIPIPE_TOKEN")
-        self.openai_model = "gpt-4.1-mini" # Free API token
-
-        # Load embeddings and metadata
-        if self.embeddings_file.exists() and self.metadata_file.exists():
-            embeddings_data = np.load(self.embeddings_file)
-            self.embeddings = embeddings_data['embeddings']
-            with open(self.metadata_file, 'r', encoding='utf-8') as f:
-                self.chunks = json.load(f)
-        else:
-            raise RuntimeError("Embeddings or metadata file not found. Please generate them first.")
-
-    def get_query_embedding_aipipe(self, query: str) -> np.ndarray:
-        """Get embedding using AIPipe OpenAI-compatible endpoint"""
-        try:
-            headers = {
-                "Authorization": self.aipipe_token,
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "text-embedding-ada-002",
-                "input": query
-            }
-            response = requests.post(
-                "https://aipipe.org/openai/v1/embeddings",
-                headers=headers,
-                json=payload,
-                timeout=20
-            )
-            response.raise_for_status()
-            data = response.json()
-            if "data" in data and len(data["data"]) > 0 and "embedding" in data["data"][0]:
-                embedding = np.array(data["data"][0]["embedding"])
-                return embedding.reshape(1, -1)
-            else:
-                print(f"AIPipe embedding API returned no embedding for: {query[:60]}")
-                return np.zeros((1, self.embeddings.shape[1]))
-        except Exception as e:
-            print(f"Error with AIPipe embedding: {e}")
-            return np.zeros((1, self.embeddings.shape[1]))
-
-    def search_similar_chunks(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Search using AIPipe embeddings for the query"""
-        query_embedding = self.get_query_embedding_aipipe(query)
-        similarities = cosine_similarity(query_embedding, self.embeddings)[0]
-        top_indices = np.argsort(similarities)[::-1][:top_k]
-        results = []
-        for idx in top_indices:
-            chunk = self.chunks[idx].copy()
-            chunk['similarity'] = float(similarities[idx])
-            results.append(chunk)
-        return results
-
-
-    def generate_response(self, question: str, image_base64: Optional[str] = None) -> Dict[str, Any]:
-        authoritative_users = {
-            "s.anand", "carlton", "Jivraj", "devam_07", "PulkitMangal",
-            "22f3001517", "SahuUtkarsh03", "deepbist", "23f1001171"
-        }
-        relevant_chunks = self.search_similar_chunks(question, top_k=8)
-        def is_authoritative(chunk):
-            return chunk['type'] == 'forum_post' and chunk.get('metadata', {}).get('username') in authoritative_users
-        relevant_chunks.sort(key=lambda c: (not is_authoritative(c), -c.get('similarity', 0)))
-        context = ""
-        for i, chunk in enumerate(relevant_chunks):
-            context += f"Context {i+1}:\nSource: {chunk['source']}\nContent: {chunk['content']}\n\n"
-        image_context = "\n\nThe user has also provided an image with their question. Please consider the image content when formulating your response." if image_base64 else ""
-        prompt = f"""Act like a Virtual Teaching Assistant for the "Tools in Data Science" course. You are responsible for helping students by answering their questions accurately and concisely using only the context provided from official course materials and forum discussions.
-
-Your task is to evaluate and respond to a student’s question, which may include an image. Carefully analyze the question and any image it contains. Your answer must strictly follow the guidelines below.
-
-Objective:
-Provide a practical, well-reasoned, and context-based answer that supports the student's learning and aligns with the official course content.
-
-Step-by-step instructions:
-1. Begin by examining whether the student has uploaded an image. If yes, extract the core problem from the image. Identify the question being asked, and propose the most efficient and practical method to solve it. Clearly state your reasoning process.
-2. Next, read the written question provided by the student. Do not assume their statements are correct—validate everything only against the provided context.
-3. Cross-reference the question (and image, if applicable) with the provided context from course materials and forum posts. Ensure all information in your answer is drawn directly from that context.
-4. If the context lacks enough information to answer the question accurately, explicitly state: "The context provided does not contain sufficient information to answer this question reliably."
-5. Focus on providing practical guidance that the student can apply. If a specific method or formula is implied in the context, walk the student through its application.
-6. If your answer refers to a specific course material or forum post, cite it using brief labels (e.g., "As seen in Module 3 notes" or "Forum reply on k-means clustering from Week 5").
-7. Use concise, student-friendly language and avoid generic or speculative responses. Talk directly to the student as if you are their personal TA.
-8. Follow all recommendations given in the course materials. For example, the course material suggests using Podman over Docker, so your answer should reflect that preference.
-9. NOTE: The bonus marks for assignments in the course are added to the total, not the maximum. Scores are typically shown out of 100. For example, if a student gets a bonus point for an assignment out of 10, their score is given as 11/10 or 110 on their dashboard.
-
-IMPORTANT:
-– Do not treat student-provided information as factual unless it is confirmed by the course context.
-– Do not guess or extrapolate beyond the context.
-– Prioritize helping the student learn how to approach the problem practically.
-
-Student Question: {question}{image_context}
-
-Relevant Context from Course Materials and Forum:
-{context}
-
-Take a deep breath and work through this problem step by step.
-"""
-        try:
-            headers = {
-                "Authorization": self.aipipe_token,
-                "Content-Type": "application/json"
-            }
-            image_content = []
-            if image_base64:
-                image_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{image_base64}"}
-                })
-            messages = [{"role": "user", "content": [{"type": "text", "text": prompt}] + image_content}]
-            data = {"model": self.openai_model, "messages": messages}
-            resp = requests.post("https://aipipe.org/openai/v1/chat/completions", headers=headers, json=data, timeout=30)
-            resp.raise_for_status()
-            answer = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-            links = []
-            for chunk in relevant_chunks[:5]:
-                if chunk['similarity'] > 0.3:
-                    if chunk['type'] == 'forum_post':
-                        md = chunk.get('metadata', {})
-                        url = f"https://discourse.onlinedegree.iitm.ac.in/t/{md.get('slug')}/{md.get('topic_id')}/{md.get('post_number')}"
-                        is_auth = md.get('username') in authoritative_users
-                        links.append({"url": url, "text": f"{'Authoritative: ' if is_auth else ''}Forum discussion - {chunk['content'][:100]}..."})
-                    elif chunk['type'] == 'course_material':
-                        fp = chunk['metadata'].get('file_path', '')
-                        md_name = Path(fp).stem if fp else 'content'
-                        links.append({"url": f"https://tds.s-anand.net/#/{md_name}", "text": f"Course material: {chunk.get('header', 'Content section')}"})
-            seen_urls, unique_links = set(), []
-            for link in links:
-                if link['url'] not in seen_urls:
-                    unique_links.append(link)
-                    seen_urls.add(link['url'])
-            return {"answer": answer or "Sorry, I could not generate a response.", "links": unique_links[:5]}
-        except Exception as e:
-            print(f"Error generating response: {e}")
-            return {"answer": "I apologize, an error occurred.", "links": []}
-
-app = Flask(__name__)
-CORS(app)
-virtual_ta = TDSVirtualTA()
-
-@app.route('/', methods=['GET', 'POST'])
-def root():
-    return jsonify({"status": "ok", "answer":"TDS Virtual TA is running.", "links": [], ".answer":"TDS Virtual TA is running.", ".links": []}), 200
-
-@app.route('/api/', methods=['GET','POST'])
-def handle_question():
-    try:
-        data = request.get_json()
-        if not data or 'question' not in data:
-            return jsonify({"answer": "", "links":[]}), 200
-        response = virtual_ta.generate_response(data['question'], data.get('image'))
-        return jsonify(response)
-    except Exception as e:
-        print(f"Error handling request: {e}")
-        return jsonify({"error": "Internal server error", "answer": "An error occurred.", "links": []}), 500
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "healthy", "message": "TDS Virtual TA is running"})
-
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)

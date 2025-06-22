@@ -1,0 +1,20 @@
+[project]
+name = "tds-virtual-ta"
+version = "0.1.0"
+description = "Lightweight and accurate virtual Teaching Assistant for the Tools in Data Science course, offered as part of the BS in Data Science program by IIT-Madras"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "flask==2.3.3",
+    "flask-cors==4.0.0",
+    "numpy==2.3.0",
+    "scikit-learn==1.7.0",
+    "requests==2.32.4",
+    "python-dotenv==1.0.0",
+    "markdown==3.5.1",
+    "Pillow==11.2.1"
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
