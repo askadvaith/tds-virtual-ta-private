@@ -53,7 +53,8 @@ curl -X POST "http://localhost:5000/api/"   -H "Content-Type: application/json" 
 I'm assuming that you're scraping the Discourse forum, which needs authentication; if you're scraping a different source altogether, you may not need this.
 
 **1. Set your Discourse cookie value:**\
-Go to Discourse, login, and then open the Network tab in DevTools. Scroll down until new content is loaded on your feed. Discourse loads in new content by sending a request to its API, which will be captured in DevTools. The request will be made to a URL that looks like this: `https://discourse.onlinedegree.iitm.ac.in/t/176077/posts.json?...`
+Go to Discourse, login, and then open the Network tab in DevTools. Scroll down until new content is loaded on your feed. Discourse loads in new content by sending a request to its API, which will be captured in DevTools. The request will be made to a URL that looks like this: `https://discourse.onlinedegree.iitm.ac.in/t/176077/posts.json?...`.\
+\
 Click on that request and look at your request headers. There will be a header called "Cookie", and there will be a value for this header in the form `_t=...;`. This is the **user authentication token cookie**. Copy the entire value upto the semicolon, and paste it into your `.env` file as the `DISCOURSE_COOKIE` variable's value.
 
 **2. Run the scraping script:**
